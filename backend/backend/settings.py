@@ -10,7 +10,7 @@ SECRET_KEY = 'django-insecure-pov$mkw9+o_&cff01-hva1ygh&t$a=!3l^mn5)($=ci0cs#qu^
 DEBUG = True
 
 # Allowed Hosts
-ALLOWED_HOSTS = ["*", "localhost", "127.0.0.1"]
+ALLOWED_HOSTS = ["*", "localhost", "127.0.0.1", "https://bankapp-tjka.onrender.com"]
 
 # CORS Settings
 CORS_ALLOW_ALL_ORIGINS = True  # During development, allow all origins
