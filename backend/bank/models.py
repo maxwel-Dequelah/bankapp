@@ -1,4 +1,5 @@
 import base64
+from decimal import Decimal
 from django.db import models
 import uuid
 from django.contrib.auth.models import AbstractUser
@@ -7,7 +8,7 @@ from django.core.exceptions import ValidationError
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from django.core.validators import MinValueValidator, RegexValidator
-
+from datetime import timedelta
 import random
 
 def generate_numeric_id():
@@ -30,6 +31,7 @@ class User(AbstractUser):
         default=generate_numeric_id,
         editable=False
     )
+    SSN = models.IntegerField(null=True, blank=True)
     dob = models.DateField(null=True, blank=True)
     first_name = models.CharField(max_length=30)
     last_name = models.CharField(max_length=30)
@@ -37,18 +39,29 @@ class User(AbstractUser):
     email = models.EmailField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
     is_admin = models.BooleanField(default=False)
+    address = models.CharField(max_length=50, blank=True, null=True)
 
     def __str__(self):
         return f"{self.first_name} - {self.username}"
 
 # Card model
 class Card(models.Model):
+    CARD_STATUS_OPTIONS = [
+        ('active', 'Active'),
+        ('expired', 'Expired'),
+        ('deactivated', 'Deactivated'),
+    ]
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="cards")
     card_number = models.CharField(max_length=16, unique=True, editable=False)
+    card_Status = models.CharField(max_length=25, choices=CARD_STATUS_OPTIONS, default="active", blank=True, null=True)
+    created_on = models.DateField(auto_now_add=True, blank=True, null=True)
+    expiry_Date = models.DateField(editable=False, blank=True, null=True)
 
     def save(self, *args, **kwargs):
+        if not self.pk:
+            self.expiry_Date = timezone.now().date() + timedelta(days=365)
         if not self.card_number:
-            last_card = Card.objects.filter(user=self.user).order_by('-card_number').first()
+            last_card = Card.objects.all().order_by('-card_number').first()
             last_digits = last_card.card_number[-4:] if last_card else "0000"
             self.card_number = generate_card_number(last_digits)
         super().save(*args, **kwargs)
@@ -56,25 +69,35 @@ class Card(models.Model):
     def __str__(self):
         return f"Card {self.card_number} for {self.user}"
 
-# Balance model
-class Balance(models.Model):
-    user = models.OneToOneField(User, on_delete=models.CASCADE, unique=True)
+# Account model
+def generate_Account_number(last_accountNumber):
+    return "098765432100" + str(int(last_accountNumber) + 1)
+
+class Account(models.Model):
+    accountNumber = models.CharField(max_length=20, unique=True, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="accountName")
     balance = models.DecimalField(
         max_digits=10,
         decimal_places=2,
-        default=0.00,
-        validators=[MinValueValidator(0.00)]
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))]
     )
     lastEdited = models.DateTimeField(auto_now=True)
 
+    def save(self, *args, **kwargs):
+        if not self.accountNumber:
+            last_account = Account.objects.all().order_by('-accountNumber').first()
+            last_digit = last_account.accountNumber[-4:] if last_account else "0"
+            self.accountNumber = generate_Account_number(last_digit)
+        super().save(*args, **kwargs)
+
     def __str__(self):
-        return f"{self.user.first_name} - {self.user.phoneNumber} - Balance: {self.balance}"
+        return f"{self.accountNumber} - Phone: {self.user.phoneNumber} - Balance: {self.balance}"
 
     def adjust_balance(self, amount):
-        """Adjust balance, ensuring it doesn't go below 10."""
-        new_balance = self.balance + amount
-        if new_balance < 10:
-            raise ValidationError("Account balance cannot go below 10.")
+        new_balance = self.balance + Decimal(amount)
+        if new_balance < 0:
+            raise ValidationError("Account balance cannot go below 0.")
         self.balance = new_balance
         self.save()
 
@@ -84,53 +107,86 @@ class Transaction(models.Model):
         ('deposit', 'Deposit'),
         ('withdrawal', 'Withdrawal'),
         ('transfer', 'Transfer'),
+        ('received', 'Received'),
     ]
-
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="transactions")
-    recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name="received_transfers", null=True, blank=True)
+    user = models.ForeignKey(User,related_name="TransuctionUser", on_delete=models.CASCADE)
+    account = models.ForeignKey(
+        Account, on_delete=models.CASCADE, related_name="sent_transactions")
+    to_account = models.ForeignKey(
+        Account, on_delete=models.CASCADE, related_name="received_transactions", null=True, blank=True
+    )
+    from_account= models.ForeignKey(Account,on_delete=models.CASCADE, related_name="accountthatSent", null=True,blank=True)
     date = models.DateTimeField(default=timezone.now)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     transaction_type = models.CharField(max_length=10, choices=TRANSACTION_TYPES)
+    fee = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'), editable=False)
 
     def __str__(self):
-        return f"{self.user.first_name}-{self.user.phoneNumber} - {self.amount} on {self.date} ({self.transaction_type})"
+        return f"{self.transaction_type.capitalize()} of {self.amount} on {self.date} ({self.id})"
 
     def save(self, *args, **kwargs):
-        """Override save to adjust user's balance before saving the transaction."""
-        balance_record = Balance.objects.get(user=self.user)
-
+        
         if self.transaction_type == 'withdrawal':
-            if self.amount < 10:
-                raise ValidationError("Minimum withdrawal amount is 10.")
-            total_deduction = self.amount * 1.02
-            if total_deduction > balance_record.balance:
-                raise ValidationError("Insufficient funds for withdrawal.")
-            balance_record.adjust_balance(-total_deduction)
-        elif self.transaction_type == 'deposit':
-            if self.amount <= 0:
-                raise ValidationError("Deposit amount must be positive.")
-            balance_record.adjust_balance(self.amount)
-        elif self.transaction_type == 'transfer':
-            if not self.recipient:
-                raise ValidationError("Transfer must specify a recipient.")
-            if self.amount < 10:
-                raise ValidationError("Minimum transfer amount is 10.")
-            total_deduction = self.amount * 1.02
-            if total_deduction > balance_record.balance:
-                raise ValidationError("Insufficient funds for transfer.")
-            balance_record.adjust_balance(-total_deduction)
-            recipient_balance = Balance.objects.get(user=self.recipient)
-            recipient_balance.adjust_balance(self.amount)
+            self.handle_withdrawal()
 
+        elif self.transaction_type == 'deposit':
+            self.handle_deposit()
+
+        elif self.transaction_type == 'transfer':
+            self.handle_transfer()
+        self.user = self.account.user
         super().save(*args, **kwargs)
 
-# Signal to automatically create balance for new users
-@receiver(post_save, sender=User)
-def create_user_balance(sender, instance, created, **kwargs):
-    if created:
-        Balance.objects.create(user=instance)
+    def handle_withdrawal(self):
+        if not self.account:
+            raise ValidationError("Withdrawal must have a source account.")
+        if self.amount < Decimal('5.00'):
+            raise ValidationError("Minimum withdrawal amount is 5.")
+        self.fee = self.amount * Decimal('0.02')  # 2% fee
+        total_deduction = self.amount + self.fee
 
+        if total_deduction > self.account.balance:
+            raise ValidationError("Insufficient funds for withdrawal.")
+
+        # Deduct the total (amount + fee) from the source account balance
+        self.account.adjust_balance(-total_deduction)
+
+    def handle_deposit(self):
+        if not self.account:
+            raise ValidationError("Deposit must have a destination account.")
+        if self.amount <= Decimal('0.00'):
+            raise ValidationError("Deposit amount must be positive.")
+
+        # Add the amount to the destination account balance
+        balanceNow =self.account.balance
+        self.account.adjust_balance(self.amount)
+
+    def handle_transfer(self):
+        if not self.account or not self.to_account:
+            raise ValidationError("Transfer must specify both from and to accounts.")
+        if self.amount < Decimal('5.00'):
+            raise ValidationError("Minimum transfer amount is 5.")
+
+        self.fee = self.amount * Decimal('0.02')  # 2% fee
+        total_deduction = self.amount + self.fee
+
+        if total_deduction > self.account.balance:
+            raise ValidationError("Insufficient funds for transfer.")
+
+        # Deduct from sender and add to recipient
+        self.account.adjust_balance(-total_deduction)
+        self.to_account.adjust_balance(self.amount)
+
+        # Create a complementary "received" transaction for the recipient
+        Transaction.objects.create(
+            account=self.to_account,
+            from_account=self.account,
+            amount=self.amount,
+            transaction_type='received'
+        )
+# Signal to automatically create account for new users
 @receiver(post_save, sender=User)
-def save_user_balance(sender, instance, **kwargs):
-    instance.balance.save()
+def create_user_account(sender, instance, created, **kwargs):
+    if created:
+        Account.objects.create(user=instance, balance=Decimal('0.00'))

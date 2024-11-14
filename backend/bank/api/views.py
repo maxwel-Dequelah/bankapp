@@ -2,10 +2,10 @@ from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from rest_framework_simplejwt.tokens import RefreshToken  # JWT Token
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.exceptions import ValidationError
-from ..models import User, Transaction, Balance
-from .serializers import RegisterSerializer, LoginSerializer, UserSerializer, TransactionSerializer, BalanceSerializer, UpdateProfileSerializer
+from ..models import User, Transaction, Account, Card
+from .serializers import RegisterSerializer, LoginSerializer, UserSerializer, CardSerializer, TransactionSerializer, AccountSerializer, UpdateProfileSerializer
 
 # Helper function to generate JWT tokens
 def get_tokens_for_user(user):
@@ -21,28 +21,43 @@ class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
 
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
+        data=request.data.copy()
+        data["username"]=data.get('phoneNumber')
+
+        serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
+
         user = serializer.save()
-        # No token generated here. User needs to log in separately.
         return Response({
             "user": UserSerializer(user).data,
             "message": "User registered successfully. Please log in."
         }, status=status.HTTP_201_CREATED)
 
+# Update Profile View
 class UpdateProfileView(generics.UpdateAPIView):
     permission_classes = [IsAuthenticated]
-    serializer_class=UpdateProfileSerializer
-    def put(self, request, pk):
-        try:
-            user = User.objects.get(pk=pk)
-            serializer = UpdateProfileSerializer(user, data=request.data, partial=True)
-            if serializer.is_valid():
-                serializer.save()
-                return Response(serializer.data, status=status.HTTP_200_OK)
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        except User.DoesNotExist:
-            return Response({"error": "User not found"}, status=status.HTTP_404_NOT_FOUND)
+    serializer_class = UpdateProfileSerializer
+
+    def get_object(self):
+        return self.request.user
+
+    def put(self, request, *args, **kwargs):
+        user = self.get_object()
+        serializer = self.serializer_class(user, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "user": UserSerializer(user).data,
+                "message": "Profile updated successfully."
+            }, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+class GetProfileView(generics.RetrieveAPIView):
+    serializer_class = UserSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self):
+        return self.request.user
 
 # Login View
 class LoginView(APIView):
@@ -60,53 +75,72 @@ class LoginView(APIView):
         }, status=status.HTTP_200_OK)
 
 # Transaction List/Create View
-class TransactionListCreateView(generics.ListCreateAPIView):
-    serializer_class = TransactionSerializer
+# Transaction List/Create View
+# Transaction List/Create View
+class TransactionListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
-        user = self.request.user
-        # If the user is an admin, return all transactions
-        if user.is_staff:
-            return Transaction.objects.all()
-        # Otherwise, return only the transactions for the authenticated user
-        return Transaction.objects.filter(user=user)
+    def post(self, request, *args, **kwargs):
+        data = request.data.copy()  # Make a copy of the incoming data to work with
 
-    def perform_create(self, serializer):
-        user = self.request.user
-        amount = serializer.validated_data['amount']
-        transaction_type = serializer.validated_data['transaction_type']
+        # Extract account and to_account from request data
+        from_account = data.get('from_account')
+        to_account = data.get('to_account')
 
-        # Get the user's balance record
+        # Validate and get the account instances
         try:
-            balance_record = Balance.objects.get(user=user)
-        except Balance.DoesNotExist:
-            raise ValidationError("User balance record not found.")
+            if from_account:
+                data['account'] = Account.objects.get(accountNumber=from_account).pk
+            if to_account:
+                data['to_account'] = Account.objects.get(accountNumber=to_account).pk
+        except Account.DoesNotExist:
+            raise ValidationError("One or both of the provided account numbers are invalid.")
 
-        # Handle balance check and update before saving the transaction
-        if transaction_type == 'withdrawal':
-            if balance_record.balance < amount:
-                raise ValidationError("Insufficient balance for this withdrawal.")
-            balance_record.adjust_balance(-amount)  # Subtract from balance
-        elif transaction_type == 'deposit':
-            balance_record.adjust_balance(amount)  # Add to balance
+        # Set the user as the currently authenticated user
+        data['user'] = request.user.pk
 
-        # Save the transaction with the user info
-        serializer.save(user=user)
+        # Validate transaction type and ensure it is specified
+        transaction_type = 'transfer'
+        if not transaction_type:
+            raise ValidationError("Transaction type is required.")
+        data['transaction_type'] = transaction_type
+
+        # Use the serializer to validate and save the transaction
+        serializer = TransactionSerializer(data=data)
+        if serializer.is_valid():
+            # Save the transaction if data is valid
+            transaction = serializer.save()
+            return Response({
+                "message": "Transaction created successfully",
+                "transaction": serializer.data
+            }, status=status.HTTP_201_CREATED)
+        else:
+            # If the serializer is invalid, return validation errors
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 # Balance Retrieve/Update View
-class BalanceRetrieveUpdateView(generics.RetrieveUpdateAPIView):
-    queryset = Balance.objects.all()
-    serializer_class = BalanceSerializer
+class BalanceRetrieveUpdateView(generics.ListAPIView):
+    
+    serializer_class = AccountSerializer
     permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        print(f"Your ballance is :{Account.objects.filter(user=self.request.user)}")
+        return Account.objects.filter(user=self.request.user)
 
-    def get_object(self):
-               
-        return self.request.user.balance
-
+# User Transaction List View
 class UserTransactionListView(generics.ListAPIView):
     serializer_class = TransactionSerializer
     permission_classes = [IsAuthenticated]
+    
 
     def get_queryset(self):
         return Transaction.objects.filter(user=self.request.user).order_by("-date")
+
+# Card List View
+class CardView(generics.ListAPIView):
+    serializer_class = CardSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Card.objects.filter(user=self.request.user)
