@@ -7,7 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Security Settings
 SECRET_KEY = 'django-insecure-pov$mkw9+o_&cff01-hva1ygh&t$a=!3l^mn5)($=ci0cs#qu^'
-DEBUG = True
+DEBUG = False
 
 # Allowed Hosts
 ALLOWED_HOSTS = ["*", "localhost", "127.0.0.1", "https://bankapp-tjka.onrender.com"]
